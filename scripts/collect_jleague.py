@@ -55,20 +55,54 @@ def _headers() -> dict:
     return {"x-apisports-key": api_key}
 
 
-def find_league_id():
+def search_leagues(query: str = "J1 League") -> pd.DataFrame:
     """
-    Jリーグの正確なリーグIDを確認するための補助関数。
-    APIの仕様変更でIDがズレることがあるので、迷ったら実行してみてください。
+    リーグ名でAPI-Football上のリーグを検索する。
+    J1_LEAGUE_ID が正しいか確認したいときに使う。
     """
     headers = _headers()
     url = f"{BASE_URL}/leagues"
-    params = {"search": "J1 League"}
+    params = {"search": query}
     res = requests.get(url, headers=headers, params=params, timeout=30)
     res.raise_for_status()
     data = res.json()
+
+    rows = []
     for item in data.get("response", []):
         league = item["league"]
-        print(f"ID: {league['id']}  名前: {league['name']}  国: {item['country']['name']}")
+        rows.append({
+            "league_id": league["id"],
+            "name": league["name"],
+            "country": item["country"]["name"],
+            "seasons": ", ".join(str(s["year"]) for s in item.get("seasons", [])),
+        })
+    columns = ["league_id", "name", "country", "seasons"]
+    return pd.DataFrame(rows, columns=columns)
+
+
+def find_league_id():
+    """
+    Jリーグの正確なリーグIDを確認するための補助関数(コンソール実行用)。
+    """
+    for _, row in search_leagues("J1 League").iterrows():
+        print(f"ID: {row['league_id']}  名前: {row['name']}  国: {row['country']}")
+
+
+def debug_raw_response(endpoint: str, params: dict) -> dict:
+    """
+    デバッグ用: 指定エンドポイント・パラメータでAPIを直接叩き、レスポンスの要点を返す。
+    'errors' に何か入っている場合、それが取得できない理由(プラン制限など)を示している。
+    """
+    headers = _headers()
+    url = f"{BASE_URL}/{endpoint}"
+    res = requests.get(url, headers=headers, params=params, timeout=30)
+    body = res.json()
+    return {
+        "status_code": res.status_code,
+        "results": body.get("results"),
+        "errors": body.get("errors"),
+        "response_sample": body.get("response", [])[:3],
+    }
 
 
 def fetch_recent_results(season: int, last_n: int = 20) -> pd.DataFrame:

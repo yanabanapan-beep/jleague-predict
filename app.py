@@ -240,6 +240,23 @@ def main():
                 st.sidebar.error(f"更新に失敗しました: {e}")
         st.rerun()
 
+    with st.sidebar.expander("デバッグ: API動作確認"):
+        if st.button("Jリーグの正しいリーグIDを検索"):
+            try:
+                st.dataframe(collect_jleague.search_leagues("J1 League"), hide_index=True)
+            except Exception as e:
+                st.error(f"エラー: {e}")
+
+        if st.button("今のリーグID・シーズンで生レスポンスを確認"):
+            try:
+                result = collect_jleague.debug_raw_response(
+                    "fixtures",
+                    {"league": collect_jleague.J1_LEAGUE_ID, "season": SEASON, "next": 5},
+                )
+                st.json(result)
+            except Exception as e:
+                st.error(f"エラー: {e}")
+
     tab = st.sidebar.radio("表示するデータ", ["Jリーグ", "競馬"])
 
     if tab == "Jリーグ":
