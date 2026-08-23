@@ -37,7 +37,8 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 _RESULT_COLUMNS = ["fixture_id", "round", "date", "home_team", "away_team", "home_goals", "away_goals", "status"]
 
-_season_cache = {}  # category -> {"season_id", "max_round", "current_round", "default_df"}
+_season_meta_cache = {}  # category -> {"season_id", "max_round"} (シーズン中はほぼ変わらないため無期限キャッシュ)
+_round_cache = {}  # (category, round_no) -> DataFrame (全試合消化済みの節のみキャッシュする)
 
 
 def _team_name(team_td) -> str:
@@ -117,21 +118,13 @@ def _fetch_html(url: str) -> str:
 def _discover_season(category: str) -> dict:
     """
     既定(節を指定しない)の日程ページから、シーズンID・現在の節番号・全体の節数を検出する。
-    同じcategoryに対する2回目以降の呼び出しはキャッシュを返す。
+
+    現在の節の情報(default_df・current_round)はスコア更新や節の切り替わりを
+    取りこぼさないよう、呼び出すたびに必ず取得し直す。
+    一方でシーズンID・全体の節数はシーズン中はほぼ変わらないため、
+    一度取得したら以降はキャッシュを使い回す。
     """
-    if category in _season_cache:
-        return _season_cache[category]
-
     html = _fetch_html(BASE_URL_TEMPLATE.format(category=category))
-
-    ids = re.findall(rf"category/{category}/schedule/(\d+)/(\d+)", html)
-    if not ids:
-        raise RuntimeError(
-            f"({CATEGORIES.get(category, category)}) シーズン情報を検出できませんでした。"
-            "Yahoo!スポーツのページ構造が変わった可能性があります。"
-        )
-    season_id = int(ids[0][0])
-    max_round = max(int(r) for _, r in ids)
 
     default_df = _parse_round_table(html)
     if default_df.empty:
@@ -142,22 +135,47 @@ def _discover_season(category: str) -> dict:
         raise RuntimeError(f"({CATEGORIES.get(category, category)}) 節番号を読み取れませんでした(表示: {label!r})")
     current_round = int(match.group(1))
 
-    info = {
-        "season_id": season_id,
-        "max_round": max_round,
+    if category not in _season_meta_cache:
+        ids = re.findall(rf"category/{category}/schedule/(\d+)/(\d+)", html)
+        if not ids:
+            raise RuntimeError(
+                f"({CATEGORIES.get(category, category)}) シーズン情報を検出できませんでした。"
+                "Yahoo!スポーツのページ構造が変わった可能性があります。"
+            )
+        _season_meta_cache[category] = {
+            "season_id": int(ids[0][0]),
+            "max_round": max(int(r) for _, r in ids),
+        }
+    meta = _season_meta_cache[category]
+
+    return {
+        "season_id": meta["season_id"],
+        "max_round": meta["max_round"],
         "current_round": current_round,
         "default_df": default_df,
     }
-    _season_cache[category] = info
-    return info
 
 
-def _fetch_round(category: str, round_no: int) -> pd.DataFrame:
-    info = _discover_season(category)
+def _fetch_round(category: str, round_no: int, info: dict) -> pd.DataFrame:
+    """
+    指定した節のデータを取得する。
+    「現在の節」は進行中の可能性があるので常に最新を取りに行く(キャッシュしない)。
+    それ以外の節は、全試合消化済みであれば結果がもう変わらないためキャッシュする。
+    """
     if round_no == info["current_round"]:
-        return info["default_df"]  # 既定ページを再利用し、無駄なリクエストを避ける
+        return info["default_df"]
+
+    cache_key = (category, round_no)
+    if cache_key in _round_cache:
+        return _round_cache[cache_key]
+
     url = f"{BASE_URL_TEMPLATE.format(category=category)}/{info['season_id']}/{round_no}/"
-    return _parse_round_table(_fetch_html(url))
+    df = _parse_round_table(_fetch_html(url))
+
+    if not df.empty and df["home_goals"].notna().all():
+        _round_cache[cache_key] = df  # 全試合消化済みの節だけキャッシュ対象にする
+
+    return df
 
 
 def fetch_recent_results(category: str = "j1", last_n: int = None) -> pd.DataFrame:
@@ -170,13 +188,17 @@ def fetch_recent_results(category: str = "j1", last_n: int = None) -> pd.DataFra
     collected = []
 
     for round_no in range(info["current_round"], 0, -1):
-        df = _fetch_round(category, round_no)
+        cache_key = (category, round_no)
+        was_cached = cache_key in _round_cache or round_no == info["current_round"]
+
+        df = _fetch_round(category, round_no, info)
         finished = df[df["home_goals"].notna()]
         if not finished.empty:
             collected.append(finished)
         if last_n is not None and sum(len(d) for d in collected) >= last_n:
             break
-        time.sleep(0.3)  # 短時間に連続アクセスしすぎないよう配慮
+        if not was_cached:
+            time.sleep(0.3)  # 新規に取得したときだけ、連続アクセスを避けるため間隔を空ける
 
     if not collected:
         return pd.DataFrame(columns=_RESULT_COLUMNS)
@@ -196,13 +218,14 @@ def fetch_upcoming_fixtures(category: str = "j1", next_n: int = 10) -> pd.DataFr
     collected = []
 
     for round_no in range(info["current_round"], info["max_round"] + 1):
-        df = _fetch_round(category, round_no)
+        df = _fetch_round(category, round_no, info)
         upcoming = df[df["home_goals"].isna()]
         if not upcoming.empty:
             collected.append(upcoming)
         if next_n is not None and sum(len(d) for d in collected) >= next_n:
             break
-        time.sleep(0.3)
+        if round_no != info["current_round"]:
+            time.sleep(0.3)  # 現在の節は既定ページを再利用するため、新規取得時だけ間隔を空ける
 
     if not collected:
         return pd.DataFrame(columns=_RESULT_COLUMNS)
