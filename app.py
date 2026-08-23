@@ -11,7 +11,7 @@ Streamlit Community Cloud で公開する場合:
     (APP_PASSWORD を設定しない場合、パスワード確認はスキップされる = ローカル開発向け)
 
 サイドバーの「最新データを取得して予測する」ボタンを押すと、
-その場でデータ収集(collect_jleague, Yahoo!スポーツのスクレイピング)と
+その場でJ1・J2両方のデータ収集(collect_jleague, Yahoo!スポーツのスクレイピング)と
 予測計算(predict)が実行される。
 """
 
@@ -31,6 +31,7 @@ import collect_jleague  # noqa: E402
 import predict  # noqa: E402
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data", "jleague")
+CATEGORIES = collect_jleague.CATEGORIES  # {"j1": "J1", "j2": "J2"}
 
 st.set_page_config(page_title="Jリーグ & 競馬 予測ダッシュボード", layout="wide")
 
@@ -58,56 +59,58 @@ def check_password() -> bool:
 
 
 def run_update_pipeline():
-    """データ収集→予測計算をまとめて実行し、CSVに保存する。"""
-    results_df = collect_jleague.fetch_recent_results(last_n=30)
-    results_df.to_csv(
-        os.path.join(DATA_DIR, f"results_{datetime.now().date()}.csv"),
-        index=False, encoding="utf-8-sig",
-    )
+    """J1・J2それぞれデータ収集→予測計算をまとめて実行し、CSVに保存する。"""
+    counts = {}
+    for category in CATEGORIES:
+        results_df = collect_jleague.fetch_recent_results(category=category, last_n=None)
+        results_df.to_csv(
+            os.path.join(DATA_DIR, f"results_{category}_{datetime.now().date()}.csv"),
+            index=False, encoding="utf-8-sig",
+        )
 
-    upcoming_df = collect_jleague.fetch_upcoming_fixtures(next_n=10)
-    upcoming_df.to_csv(
-        os.path.join(DATA_DIR, f"upcoming_{datetime.now().date()}.csv"),
-        index=False, encoding="utf-8-sig",
-    )
+        upcoming_df = collect_jleague.fetch_upcoming_fixtures(category=category, next_n=10)
+        upcoming_df.to_csv(
+            os.path.join(DATA_DIR, f"upcoming_{category}_{datetime.now().date()}.csv"),
+            index=False, encoding="utf-8-sig",
+        )
 
-    form_df = collect_jleague.build_team_form(results_df)
-    form_df.to_csv(
-        os.path.join(DATA_DIR, f"team_form_{datetime.now().date()}.csv"),
-        index=False, encoding="utf-8-sig",
-    )
+        form_df = collect_jleague.build_team_form(results_df)
+        form_df.to_csv(
+            os.path.join(DATA_DIR, f"team_form_{category}_{datetime.now().date()}.csv"),
+            index=False, encoding="utf-8-sig",
+        )
 
-    predictions_df = predict.predict_fixtures(upcoming_df, form_df)
-    predictions_df.to_csv(
-        os.path.join(DATA_DIR, f"predictions_{datetime.now().date()}.csv"),
-        index=False, encoding="utf-8-sig",
-    )
+        predictions_df = predict.predict_fixtures(upcoming_df, form_df)
+        predictions_df.to_csv(
+            os.path.join(DATA_DIR, f"predictions_{category}_{datetime.now().date()}.csv"),
+            index=False, encoding="utf-8-sig",
+        )
 
-    return {
-        "results": len(results_df),
-        "upcoming": len(upcoming_df),
-    }
+        counts[category] = {"results": len(results_df), "upcoming": len(upcoming_df)}
+
+    return counts
 
 
-def _latest_file(prefix: str):
-    pattern = os.path.join(DATA_DIR, f"{prefix}_*.csv")
+def _latest_file(prefix: str, category: str):
+    pattern = os.path.join(DATA_DIR, f"{prefix}_{category}_*.csv")
     files = sorted(glob.glob(pattern))
     return files[-1] if files else None
 
 
-def _load_latest(prefix: str):
-    path = _latest_file(prefix)
+def _load_latest(prefix: str, category: str):
+    path = _latest_file(prefix, category)
     if path is None:
         return None
     return pd.read_csv(path)
 
 
-def render_jleague_tab():
-    st.header("Jリーグ")
+def render_league_tab(category: str):
+    label = CATEGORIES[category]
+    st.header(label)
 
-    upcoming_df = _load_latest("upcoming")
-    predictions_df = _load_latest("predictions")
-    form_df = _load_latest("team_form")
+    upcoming_df = _load_latest("upcoming", category)
+    predictions_df = _load_latest("predictions", category)
+    form_df = _load_latest("team_form", category)
 
     if upcoming_df is None or predictions_df is None:
         st.warning(
@@ -144,7 +147,7 @@ def render_jleague_tab():
         hide_index=True,
     )
 
-    st.subheader("チーム成績(直近)")
+    st.subheader(f"チーム成績({label} 今シーズン全試合)")
     if form_df is not None and not form_df.empty:
         col1, col2 = st.columns([2, 1])
         with col1:
@@ -177,10 +180,10 @@ def main():
 
     st.sidebar.subheader("データ更新")
     if st.sidebar.button("最新データを取得して予測する"):
-        with st.spinner("データ収集・予測計算 中..."):
+        with st.spinner("データ収集・予測計算 中...(J1・J2の今シーズン全試合を取得するため、数十秒かかります)"):
             try:
                 counts = run_update_pipeline()
-                if counts["results"] == 0 and counts["upcoming"] == 0:
+                if all(c["results"] == 0 and c["upcoming"] == 0 for c in counts.values()):
                     st.sidebar.warning(
                         "更新はできましたが、試合データが0件でした。"
                         "データ取得元(Yahoo!スポーツ)のページ構造が変わった可能性があります。"
@@ -191,10 +194,12 @@ def main():
                 st.sidebar.error(f"更新に失敗しました: {e}")
         st.rerun()
 
-    tab = st.sidebar.radio("表示するデータ", ["Jリーグ", "競馬"])
+    tab = st.sidebar.radio("表示するデータ", ["J1", "J2", "競馬"])
 
-    if tab == "Jリーグ":
-        render_jleague_tab()
+    if tab == "J1":
+        render_league_tab("j1")
+    elif tab == "J2":
+        render_league_tab("j2")
     else:
         render_keiba_tab()
 

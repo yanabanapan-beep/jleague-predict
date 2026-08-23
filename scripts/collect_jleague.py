@@ -1,25 +1,21 @@
 """
 Jリーグ データ収集スクリプト
 ------------------------------------
-データソース: Yahoo!スポーツ (https://soccer.yahoo.co.jp/jleague/category/j1/schedule)
+データソース: Yahoo!スポーツ (https://soccer.yahoo.co.jp/jleague/category/{j1|j2}/schedule)
   - Jリーグの公式無料APIが存在しない(API-Footballの無料プランは現在シーズンのデータに
     対応していないことが判明したため)、公開されている試合日程ページをスクレイピングして
     データを取得する方式にしている。
   - 個人利用の範囲で、短時間に大量アクセスしないよう配慮すること。
   - サイトのHTML構造が変わると動かなくなる可能性がある(non-API方式の宿命)。
 
-SEASON_ID について:
-  - Jリーグ戦(節)ごとのURLには "シーズンID" という数字が含まれており、
-    シーズン(年度・ステージ)が変わるとこの数字も変わる。
-  - 確認方法:
-    1. https://soccer.yahoo.co.jp/jleague/category/j1/schedule をブラウザで開く
-    2. 節を切り替えるリンクをクリックすると URL が
-       https://soccer.yahoo.co.jp/jleague/category/j1/schedule/【ここの数字】/【節番号】/
-       のようになるので、その数字を下の SEASON_ID に設定する
+シーズンID・節数について:
+  - 節を切り替えるリンクがページに埋め込まれているので、そこから
+    シーズンID(年度・大会ごとに変わる数字)と全体の節数を自動検出している。
+  - そのため、シーズンが変わっても基本的にコードの変更なしで動く想定。
 
 使い方:
   1. pip install -r requirements.txt
-  2. python scripts/collect_jleague.py を実行
+  2. python scripts/collect_jleague.py を実行(J1・J2 両方のデータを取得する)
 """
 
 import os
@@ -31,14 +27,17 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-SEASON_ID = 31467  # 2026/27シーズン J1リーグ戦。シーズンが変わったら要確認(上記コメント参照)
-BASE_URL = "https://soccer.yahoo.co.jp/jleague/category/j1/schedule"
+CATEGORIES = {"j1": "J1", "j2": "J2"}  # Yahoo!スポーツ側のカテゴリ名 -> 表示名
+
+BASE_URL_TEMPLATE = "https://soccer.yahoo.co.jp/jleague/category/{category}/schedule"
 REQUEST_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; jleague-predict-dashboard/1.0)"}
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "jleague")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 _RESULT_COLUMNS = ["fixture_id", "round", "date", "home_team", "away_team", "home_goals", "away_goals", "status"]
+
+_season_cache = {}  # category -> {"season_id", "max_round", "current_round", "default_df"}
 
 
 def _team_name(team_td) -> str:
@@ -79,15 +78,8 @@ def _parse_score(score_td):
     return home_goals, away_goals, status, fixture_id
 
 
-def _fetch_round(round_no: int = None) -> pd.DataFrame:
-    """
-    指定した節(ラウンド)の対戦カード一覧を取得する。
-    round_no を指定しない場合、サイト側で選ばれている既定の節が表示される。
-    """
-    url = f"{BASE_URL}/{SEASON_ID}/{round_no}/" if round_no else BASE_URL
-    res = requests.get(url, headers=REQUEST_HEADERS, timeout=30)
-    res.raise_for_status()
-    soup = BeautifulSoup(res.text, "html.parser")
+def _parse_round_table(html: str) -> pd.DataFrame:
+    soup = BeautifulSoup(html, "html.parser")
 
     rows = []
     for tr in soup.select("tr"):
@@ -116,61 +108,109 @@ def _fetch_round(round_no: int = None) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=_RESULT_COLUMNS)
 
 
-def _current_round_number() -> int:
-    """既定表示されている節の番号を読み取る(例: "第4節" -> 4)。"""
-    default_df = _fetch_round(None)
+def _fetch_html(url: str) -> str:
+    res = requests.get(url, headers=REQUEST_HEADERS, timeout=30)
+    res.raise_for_status()
+    return res.text
+
+
+def _discover_season(category: str) -> dict:
+    """
+    既定(節を指定しない)の日程ページから、シーズンID・現在の節番号・全体の節数を検出する。
+    同じcategoryに対する2回目以降の呼び出しはキャッシュを返す。
+    """
+    if category in _season_cache:
+        return _season_cache[category]
+
+    html = _fetch_html(BASE_URL_TEMPLATE.format(category=category))
+
+    ids = re.findall(rf"category/{category}/schedule/(\d+)/(\d+)", html)
+    if not ids:
+        raise RuntimeError(
+            f"({CATEGORIES.get(category, category)}) シーズン情報を検出できませんでした。"
+            "Yahoo!スポーツのページ構造が変わった可能性があります。"
+        )
+    season_id = int(ids[0][0])
+    max_round = max(int(r) for _, r in ids)
+
+    default_df = _parse_round_table(html)
     if default_df.empty:
-        raise RuntimeError("節の情報を取得できませんでした。サイト構造が変わった可能性があります。")
+        raise RuntimeError(f"({CATEGORIES.get(category, category)}) 節情報を取得できませんでした。")
     label = default_df.iloc[0]["round"] or ""
     match = re.search(r"(\d+)", label)
     if not match:
-        raise RuntimeError(f"節番号を読み取れませんでした(取得した表示: {label!r})")
-    return int(match.group(1))
+        raise RuntimeError(f"({CATEGORIES.get(category, category)}) 節番号を読み取れませんでした(表示: {label!r})")
+    current_round = int(match.group(1))
+
+    info = {
+        "season_id": season_id,
+        "max_round": max_round,
+        "current_round": current_round,
+        "default_df": default_df,
+    }
+    _season_cache[category] = info
+    return info
 
 
-def fetch_recent_results(last_n: int = 30) -> pd.DataFrame:
+def _fetch_round(category: str, round_no: int) -> pd.DataFrame:
+    info = _discover_season(category)
+    if round_no == info["current_round"]:
+        return info["default_df"]  # 既定ページを再利用し、無駄なリクエストを避ける
+    url = f"{BASE_URL_TEMPLATE.format(category=category)}/{info['season_id']}/{round_no}/"
+    return _parse_round_table(_fetch_html(url))
+
+
+def fetch_recent_results(category: str = "j1", last_n: int = None) -> pd.DataFrame:
     """
-    直近の消化済み試合結果を、節を過去にさかのぼりながら last_n 件集める。
+    消化済み試合結果を取得する。
+    last_n=None の場合、今シーズンの第1節から現在までの全試合を取得する。
+    last_n を指定した場合は、直近の指定件数だけを節をさかのぼって集める。
     """
-    current_round = _current_round_number()
+    info = _discover_season(category)
     collected = []
-    round_no = current_round
-    while round_no >= 1 and sum(len(d) for d in collected) < last_n:
-        df = _fetch_round(round_no)
+
+    for round_no in range(info["current_round"], 0, -1):
+        df = _fetch_round(category, round_no)
         finished = df[df["home_goals"].notna()]
         if not finished.empty:
             collected.append(finished)
-        round_no -= 1
+        if last_n is not None and sum(len(d) for d in collected) >= last_n:
+            break
         time.sleep(0.3)  # 短時間に連続アクセスしすぎないよう配慮
 
     if not collected:
         return pd.DataFrame(columns=_RESULT_COLUMNS)
 
     result = pd.concat(collected, ignore_index=True)
-    return result.head(last_n).reset_index(drop=True)
+    if last_n is not None:
+        result = result.head(last_n)
+    return result.reset_index(drop=True)
 
 
-def fetch_upcoming_fixtures(next_n: int = 10) -> pd.DataFrame:
+def fetch_upcoming_fixtures(category: str = "j1", next_n: int = 10) -> pd.DataFrame:
     """
-    今後の対戦カード(未消化試合)を、節を進めながら next_n 件集める。
+    今後の対戦カード(未消化試合)を取得する。
+    next_n=None の場合、今シーズン残り全ての対戦カードを取得する。
     """
-    current_round = _current_round_number()
+    info = _discover_season(category)
     collected = []
-    round_no = current_round
-    max_round = current_round + 10  # 安全のため探索範囲に上限を設ける
-    while round_no <= max_round and sum(len(d) for d in collected) < next_n:
-        df = _fetch_round(round_no)
+
+    for round_no in range(info["current_round"], info["max_round"] + 1):
+        df = _fetch_round(category, round_no)
         upcoming = df[df["home_goals"].isna()]
         if not upcoming.empty:
             collected.append(upcoming)
-        round_no += 1
+        if next_n is not None and sum(len(d) for d in collected) >= next_n:
+            break
         time.sleep(0.3)
 
     if not collected:
         return pd.DataFrame(columns=_RESULT_COLUMNS)
 
     result = pd.concat(collected, ignore_index=True)
-    return result.head(next_n).reset_index(drop=True)
+    if next_n is not None:
+        result = result.head(next_n)
+    return result.reset_index(drop=True)
 
 
 def build_team_form(results_df: pd.DataFrame) -> pd.DataFrame:
@@ -210,26 +250,29 @@ def build_team_form(results_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def main():
-    print("直近の試合結果を取得中...")
-    results_df = fetch_recent_results(last_n=30)
-    results_path = os.path.join(DATA_DIR, f"results_{datetime.now().date()}.csv")
-    results_df.to_csv(results_path, index=False, encoding="utf-8-sig")
-    print(f"保存しました: {results_path}")
+    for category, label in CATEGORIES.items():
+        print(f"\n===== {label} =====")
 
-    print("今後の対戦カードを取得中...")
-    upcoming_df = fetch_upcoming_fixtures(next_n=10)
-    upcoming_path = os.path.join(DATA_DIR, f"upcoming_{datetime.now().date()}.csv")
-    upcoming_df.to_csv(upcoming_path, index=False, encoding="utf-8-sig")
-    print(f"保存しました: {upcoming_path}")
+        print("今シーズンの全試合結果を取得中...")
+        results_df = fetch_recent_results(category=category, last_n=None)
+        results_path = os.path.join(DATA_DIR, f"results_{category}_{datetime.now().date()}.csv")
+        results_df.to_csv(results_path, index=False, encoding="utf-8-sig")
+        print(f"保存しました: {results_path} ({len(results_df)}試合)")
 
-    print("チームごとの直近成績を集計中...")
-    form_df = build_team_form(results_df)
-    form_path = os.path.join(DATA_DIR, f"team_form_{datetime.now().date()}.csv")
-    form_df.to_csv(form_path, index=False, encoding="utf-8-sig")
-    print(f"保存しました: {form_path}")
+        print("今後の対戦カードを取得中...")
+        upcoming_df = fetch_upcoming_fixtures(category=category, next_n=10)
+        upcoming_path = os.path.join(DATA_DIR, f"upcoming_{category}_{datetime.now().date()}.csv")
+        upcoming_df.to_csv(upcoming_path, index=False, encoding="utf-8-sig")
+        print(f"保存しました: {upcoming_path} ({len(upcoming_df)}試合)")
 
-    print("\n=== チーム成績サマリー(上位5) ===")
-    print(form_df.head())
+        print("チームごとの成績を集計中...")
+        form_df = build_team_form(results_df)
+        form_path = os.path.join(DATA_DIR, f"team_form_{category}_{datetime.now().date()}.csv")
+        form_df.to_csv(form_path, index=False, encoding="utf-8-sig")
+        print(f"保存しました: {form_path}")
+
+        print(f"\n=== {label} チーム成績サマリー(上位5) ===")
+        print(form_df.head())
 
 
 if __name__ == "__main__":

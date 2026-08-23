@@ -22,7 +22,10 @@ from datetime import datetime
 
 import pandas as pd
 
+import collect_jleague
+
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "jleague")
+CATEGORIES = collect_jleague.CATEGORIES  # {"j1": "J1", "j2": "J2"}
 
 # ホームチームの有利さ(得失点差に上乗せする補正値)。値が大きいほどホーム有利を強く見る。
 HOME_ADVANTAGE = 0.3
@@ -32,8 +35,8 @@ DRAW_BASELINE = 0.9
 STRENGTH_SCALE = 0.6
 
 
-def _latest_file(prefix: str) -> str:
-    pattern = os.path.join(DATA_DIR, f"{prefix}_*.csv")
+def _latest_file(prefix: str, category: str) -> str:
+    pattern = os.path.join(DATA_DIR, f"{prefix}_{category}_*.csv")
     files = sorted(glob.glob(pattern))
     if not files:
         raise FileNotFoundError(
@@ -81,19 +84,17 @@ def predict_fixtures(upcoming_df: pd.DataFrame, form_df: pd.DataFrame) -> pd.Dat
 
 
 def main():
-    upcoming_path = _latest_file("upcoming")
-    form_path = _latest_file("team_form")
+    for category, label in CATEGORIES.items():
+        print(f"\n===== {label} =====")
+        upcoming_df = pd.read_csv(_latest_file("upcoming", category))
+        form_df = pd.read_csv(_latest_file("team_form", category))
 
-    upcoming_df = pd.read_csv(upcoming_path)
-    form_df = pd.read_csv(form_path)
+        predictions_df = predict_fixtures(upcoming_df, form_df)
 
-    predictions_df = predict_fixtures(upcoming_df, form_df)
-
-    predictions_path = os.path.join(DATA_DIR, f"predictions_{datetime.now().date()}.csv")
-    predictions_df.to_csv(predictions_path, index=False, encoding="utf-8-sig")
-    print(f"保存しました: {predictions_path}")
-    print("\n=== 予測結果 ===")
-    print(predictions_df)
+        predictions_path = os.path.join(DATA_DIR, f"predictions_{category}_{datetime.now().date()}.csv")
+        predictions_df.to_csv(predictions_path, index=False, encoding="utf-8-sig")
+        print(f"保存しました: {predictions_path}")
+        print(predictions_df)
 
 
 if __name__ == "__main__":
