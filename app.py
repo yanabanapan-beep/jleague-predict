@@ -97,6 +97,12 @@ def run_update_pipeline():
         index=False, encoding="utf-8-sig",
     )
 
+    return {
+        "results": len(results_df),
+        "upcoming": len(upcoming_df),
+        "injuries": len(injuries_df),
+    }
+
 
 def _latest_file(prefix: str):
     pattern = os.path.join(DATA_DIR, f"{prefix}_*.csv")
@@ -128,6 +134,13 @@ def render_jleague_tab():
         return
 
     st.subheader("今後の対戦カード・予測勝率")
+    if upcoming_df.empty:
+        st.info(
+            "今後の対戦カードが見つかりませんでした。"
+            "オフシーズン、またはAPI-Footballの契約プランがJリーグ(J1)のデータに"
+            "対応していない可能性があります。"
+        )
+        return
     merged = upcoming_df.merge(
         predictions_df[["fixture_id", "home_win_prob", "draw_prob", "away_win_prob"]],
         on="fixture_id",
@@ -214,8 +227,15 @@ def main():
     if st.sidebar.button("最新データを取得して予測する"):
         with st.spinner("データ収集・予測計算 中..."):
             try:
-                run_update_pipeline()
-                st.sidebar.success("更新しました")
+                counts = run_update_pipeline()
+                if counts["results"] == 0 and counts["upcoming"] == 0:
+                    st.sidebar.warning(
+                        "更新はできましたが、試合データが0件でした。"
+                        "オフシーズン、またはAPI-Footballの契約プランがJリーグ(J1)のデータに"
+                        "対応していない可能性があります。"
+                    )
+                else:
+                    st.sidebar.success("更新しました")
             except Exception as e:
                 st.sidebar.error(f"更新に失敗しました: {e}")
         st.rerun()

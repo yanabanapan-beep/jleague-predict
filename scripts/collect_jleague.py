@@ -103,7 +103,8 @@ def fetch_recent_results(season: int, last_n: int = 20) -> pd.DataFrame:
             "home_win": teams["home"]["winner"],
             "away_win": teams["away"]["winner"],
         })
-    return pd.DataFrame(rows)
+    columns = ["fixture_id", "date", "home_team", "away_team", "home_goals", "away_goals", "home_win", "away_win"]
+    return pd.DataFrame(rows, columns=columns)
 
 
 def fetch_upcoming_fixtures(season: int, next_n: int = 10) -> pd.DataFrame:
@@ -131,7 +132,8 @@ def fetch_upcoming_fixtures(season: int, next_n: int = 10) -> pd.DataFrame:
             "home_team": teams["home"]["name"],
             "away_team": teams["away"]["name"],
         })
-    return pd.DataFrame(rows)
+    columns = ["fixture_id", "date", "home_team", "away_team"]
+    return pd.DataFrame(rows, columns=columns)
 
 
 def fetch_injuries(season: int, team_ids: list = None) -> pd.DataFrame:
@@ -169,7 +171,8 @@ def fetch_injuries(season: int, team_ids: list = None) -> pd.DataFrame:
                 "fixture_date": fixture.get("date"),
             })
 
-    return pd.DataFrame(rows)
+    columns = ["team", "player", "type", "reason", "fixture_id", "fixture_date"]
+    return pd.DataFrame(rows, columns=columns)
 
 
 def build_team_form(results_df: pd.DataFrame) -> pd.DataFrame:
@@ -198,7 +201,8 @@ def build_team_form(results_df: pd.DataFrame) -> pd.DataFrame:
             "wins": wins,
         })
 
-    return pd.DataFrame(records).sort_values("goal_diff", ascending=False)
+    columns = ["team", "games_played", "goals_for", "goals_against", "goal_diff", "wins"]
+    return pd.DataFrame(records, columns=columns).sort_values("goal_diff", ascending=False)
 
 
 def main():

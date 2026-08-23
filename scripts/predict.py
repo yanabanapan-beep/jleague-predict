@@ -76,7 +76,8 @@ def predict_fixtures(upcoming_df: pd.DataFrame, form_df: pd.DataFrame) -> pd.Dat
             "away_win_prob": round(exp_away / total * 100, 1),
         })
 
-    return pd.DataFrame(rows)
+    columns = ["fixture_id", "date", "home_team", "away_team", "home_win_prob", "draw_prob", "away_win_prob"]
+    return pd.DataFrame(rows, columns=columns)
 
 
 def main():
