@@ -194,14 +194,11 @@ def main():
                 st.sidebar.error(f"更新に失敗しました: {e}")
         st.rerun()
 
-    tab = st.sidebar.radio("表示するデータ", ["J1", "J2", "競馬"])
-
-    if tab == "J1":
-        render_league_tab("j1")
-    elif tab == "J2":
-        render_league_tab("j2")
-    else:
-        render_keiba_tab()
+    render_league_tab("j1")
+    st.divider()
+    render_league_tab("j2")
+    st.divider()
+    render_keiba_tab()
 
 
 if __name__ == "__main__":
