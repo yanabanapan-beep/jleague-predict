@@ -104,6 +104,30 @@ def _load_latest(prefix: str, category: str):
     return pd.read_csv(path)
 
 
+def _recommend(row) -> pd.Series:
+    """
+    ホーム勝ち・引き分け・アウェイ勝ちのうち最も確率が高いものを「推奨」とし、
+    1位と2位の確率差(pt)から「自信度」を判定する。
+    """
+    probs = {
+        "ホーム勝ち": row["home_win_prob"],
+        "引き分け": row["draw_prob"],
+        "アウェイ勝ち": row["away_win_prob"],
+    }
+    ranked = sorted(probs.items(), key=lambda item: item[1], reverse=True)
+    top_label, top_value = ranked[0]
+    margin = top_value - ranked[1][1]
+
+    if margin >= 20:
+        confidence = "◎"
+    elif margin >= 10:
+        confidence = "○"
+    else:
+        confidence = "△"
+
+    return pd.Series({"recommend": top_label, "confidence": confidence})
+
+
 def render_league_tab(category: str):
     label = CATEGORIES[category]
     st.header(label)
@@ -132,8 +156,13 @@ def render_league_tab(category: str):
         on="fixture_id",
         how="left",
     )
+    merged[["recommend", "confidence"]] = merged.apply(_recommend, axis=1)
 
-    display_cols = ["date", "home_team", "away_team", "home_win_prob", "draw_prob", "away_win_prob"]
+    display_cols = [
+        "date", "home_team", "away_team",
+        "home_win_prob", "draw_prob", "away_win_prob",
+        "recommend", "confidence",
+    ]
     st.dataframe(
         merged[display_cols].rename(columns={
             "date": "日時",
@@ -142,9 +171,15 @@ def render_league_tab(category: str):
             "home_win_prob": "ホーム勝率(%)",
             "draw_prob": "引分率(%)",
             "away_win_prob": "アウェイ勝率(%)",
+            "recommend": "推奨",
+            "confidence": "自信度",
         }),
         use_container_width=True,
         hide_index=True,
+    )
+    st.caption(
+        "自信度: ◎ = 1位の予測が2位を20pt以上リード / ○ = 10〜20pt差 / △ = 10pt未満の接戦。"
+        "予測はあくまで直近の得失点差に基づく簡易な参考値であり、当たりを保証するものではありません。"
     )
 
     st.subheader(f"チーム成績({label} 今シーズン全試合)")
