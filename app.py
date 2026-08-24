@@ -80,9 +80,15 @@ def run_update_pipeline():
             index=False, encoding="utf-8-sig",
         )
 
-        predictions_df = predict.predict_fixtures(upcoming_df, form_df)
+        predictions_df = predict.predict_fixtures(upcoming_df, results_df)
         predictions_df.to_csv(
             os.path.join(DATA_DIR, f"predictions_{category}_{datetime.now().date()}.csv"),
+            index=False, encoding="utf-8-sig",
+        )
+
+        elo_df = predict.compute_elo_ratings(results_df)
+        elo_df.to_csv(
+            os.path.join(DATA_DIR, f"elo_{category}_{datetime.now().date()}.csv"),
             index=False, encoding="utf-8-sig",
         )
 
@@ -179,16 +185,22 @@ def render_league_tab(category: str):
     )
     st.caption(
         "自信度: ◎ = 1位の予測が2位を20pt以上リード / ○ = 10〜20pt差 / △ = 10pt未満の接戦。"
-        "予測はあくまで直近の得失点差に基づく簡易な参考値であり、当たりを保証するものではありません。"
+        "予測はチームの得点力・失点力から算出したポアソン分布モデルによる参考値であり、"
+        "当たりを保証するものではありません。"
     )
 
-    st.subheader(f"チーム成績({label} 今シーズン全試合)")
+    st.subheader(f"チーム成績・ELOレーティング({label} 今シーズン全試合)")
     if form_df is not None and not form_df.empty:
+        elo_df = _load_latest("elo", category)
+        if elo_df is not None and not elo_df.empty:
+            form_df = form_df.merge(elo_df, on="team", how="left").sort_values("elo", ascending=False)
+
         col1, col2 = st.columns([2, 1])
         with col1:
             st.dataframe(
                 form_df.rename(columns={
                     "team": "チーム",
+                    "elo": "ELO",
                     "games_played": "試合数",
                     "goals_for": "得点",
                     "goals_against": "失点",
@@ -199,7 +211,14 @@ def render_league_tab(category: str):
                 hide_index=True,
             )
         with col2:
-            st.bar_chart(form_df.set_index("team")["goal_diff"])
+            if "elo" in form_df.columns:
+                st.bar_chart(form_df.set_index("team")["elo"])
+            else:
+                st.bar_chart(form_df.set_index("team")["goal_diff"])
+        st.caption(
+            "ELO: 対戦結果を時系列で処理し、相手の強さに応じて上下するチームの強さ指標(初期値1500)。"
+            "チェスのレーティングと同じ考え方。"
+        )
 
 
 def render_keiba_tab():
